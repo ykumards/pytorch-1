@@ -2140,10 +2140,95 @@ void ProcessGroupNCCL::groupEnd() {
 }
 
 c10::intrusive_ptr<ProcessGroup::Work> ProcessGroupNCCL::gather(
-    std::vector<std::vector<at::Tensor>>& /* unused */,
-    std::vector<at::Tensor>& /* unused */,
-    const GatherOptions& /* unused */) {
-  TORCH_CHECK(false, "ProcessGroupNCCL does not support gather");
+    std::vector<std::vector<at::Tensor>>& outputTensors,
+    std::vector<at::Tensor>& inputTensors,
+    const GatherOptions& opts) {
+  static auto invalidArgument = [](const std::string& msg) {
+    TORCH_CHECK(false, "ProcessGroupNCCL::gather: " + msg);
+  };
+
+  assertRootRank(invalidArgument, opts.rootRank, size_);
+  check_gpu_tensors(inputTensors);
+  assertSingleElementInput(invalidArgument, inputTensors);
+
+  std::vector<at::Tensor> outputFlattened;
+
+  // @lint-ignore CLANGTIDY
+  auto tensor = inputTensors.back();
+  RECORD_PARAM_COMMS(
+      rank_,                    // rank
+      "gather",                 // colName
+      tensor.numel(),           // inSize
+      tensor.numel() *
+        this->getSize(),        // outSize
+      tensor.scalar_type(),     // dType
+      std::vector<int64_t>(),   // inSplitSizes
+      std::vector<int64_t>());  // outSplitSize
+
+  if (getRank() == opts.rootRank) {
+    if (outputTensors.size() != 1) {
+      std::stringstream ss;
+      ss << "requires a single-element output list containing a list with "
+         << getSize() << " tensors.";
+      invalidArgument(ss.str());
+    } else if (outputTensors[0].size() != static_cast<size_t>(getSize())) {
+      std::stringstream ss;
+      ss << "Incorrect output list size " << outputTensors[0].size()
+         << ". Output list size should be " << getSize()
+         << ", same as size of the process group.";
+      invalidArgument(ss.str());
+    }
+
+    outputFlattened = flatten_for_scatter_gather(outputTensors, inputTensors, size_);
+    check_gpu_tensors(outputFlattened);
+
+    const auto& options = inputTensors[0].options();
+    const auto& sizes = inputTensors[0].sizes();
+    assertTypeAndSizesMatch(invalidArgument, outputTensors[0], options, sizes);
+  } else {
+    // if not in the root rank, initialize outputFlattened as empty place holder
+    if (outputTensors.size() != 0) {
+      invalidArgument("requires empty output on non-root");
+    }
+
+    for(int i = 0; i < inputTensors.size(); ++ i) {
+      outputFlattened.emplace_back(at::empty_like(inputTensors[i], inputTensors[i].options()));
+    }
+  }
+
+  return collective(
+      inputTensors,
+      outputFlattened,
+      [&](at::Tensor& input,
+          at::Tensor& output,
+          ncclComm_t comm,
+          at::cuda::CUDAStream& stream) {
+        const auto root = opts.rootRank;
+        if (getRank() == root) {
+          c10::cuda::CUDACachingAllocator::recordStream(
+              output.storage().data_ptr(), stream);
+        }
+        torch::cuda::nccl::gather(input, output, comm, stream, root);
+        return ncclSuccess;
+      },
+      [&](std::vector<at::cuda::CUDAStream>& ncclStreams) {},
+      [&](std::vector<at::cuda::CUDAStream>& ncclStreams) {
+        const auto root = opts.rootRank;
+        if (getRank() == root) {
+          // Copy the flattened output tensors to the outputs.
+          for (const auto i : c10::irange(outputTensors.size())) {
+            at::cuda::CUDAStreamGuard guard(ncclStreams[i]);
+            for (size_t j = 0; j < outputTensors[0].size(); ++j) {
+              // See [Sync Streams].
+              c10::cuda::CUDACachingAllocator::recordStream(
+                  outputTensors[i][j].storage().data_ptr(), ncclStreams[i]);
+              outputTensors[i][j].copy_(outputFlattened[i][j], true);
+            }
+          }
+        }
+      },
+      OpType::GATHER,
+      "nccl:gather");
 }
 
 c10::intrusive_ptr<ProcessGroup::Work> ProcessGroupNCCL::scatter(
