@@ -364,10 +364,12 @@ class TensorExprFuser {
   TensorExprFuser(
       std::shared_ptr<Graph> graph,
       size_t min_group_size,
-      bool disable_shape_checks)
+      bool disable_shape_checks,
+      bool add_composed_op)
       : graph_(std::move(graph)),
         min_group_size_(min_group_size),
-        disable_shape_checks_(disable_shape_checks) {
+        disable_shape_checks_(disable_shape_checks),
+        add_composed_op_(add_composed_op) {
     parseTENotFuseOption();
   }
 
@@ -1171,7 +1173,7 @@ class TensorExprFuser {
     }
     for (Node* fusion_group : fusion_groups) {
       VLOG(1) << "GenerateGuard for fusion group: " << *fusion_group;
-      if (!GenerateGuard(fusion_group, /*add_composed_op=*/true)) {
+      if (!GenerateGuard(fusion_group, add_composed_op_)) {
         VLOG(1) << "  Unfusing the fusion group because GenerateGuard failed"
                 << std::endl;
         SubgraphUtils::unmergeSubgraph(fusion_group);
@@ -1209,12 +1211,15 @@ class TensorExprFuser {
   size_t min_group_size_;
   // If true, shapes are ignored
   bool disable_shape_checks_;
+  // compose Runtime Type Guard and Kernel in one op
+  bool add_composed_op_;
 };
 
 void FuseTensorExprs(
     std::shared_ptr<Graph>& graph,
     size_t min_group_size,
-    bool disable_shape_checks) {
+    bool disable_shape_checks,
+    bool add_composed_op) {
   GRAPH_DUMP("Before TExprFuser: ", graph);
 
   // Temporary change for Block code generation.
@@ -1225,7 +1230,8 @@ void FuseTensorExprs(
   // Get rid of dead code so that we don't waste effort fusing it.
   EliminateDeadCode(graph);
 
-  TensorExprFuser fuser(graph, min_group_size, disable_shape_checks);
+  TensorExprFuser fuser(
+      graph, min_group_size, disable_shape_checks, add_composed_op);
   fuser.run();
 
   EliminateCommonSubexpression(graph);
@@ -1251,11 +1257,42 @@ Operation createTensorExprOp(const Node* node) {
   if (node->hasAttribute(attr::symbolic_shape_inputs)) {
     sym_shapes = node->is(attr::symbolic_shape_inputs);
   }
+
   std::unordered_map<c10::Symbol, tensorexpr::NNCLoweringFunction>
       custom_lowerings;
   auto subgraph = node->g(attr::Subgraph);
-  auto kernel = std::make_shared<tensorexpr::TensorExprKernel>(
-      subgraph, custom_lowerings, sym_shapes);
+  IValue sym_strides = node->ival(attr::striding_inputs_desc);
+
+  // Striding Descriptor is serialized on the node as a vector of vector of
+  // strings, translate back to StrideInput enum
+  std::vector<std::vector<std::string>> sym_strides_strs =
+      sym_strides.to<std::vector<std::vector<std::string>>>();
+  std::vector<std::vector<StrideInput>> striding_inputs;
+  for (const auto& vec : sym_strides_strs) {
+    std::vector<StrideInput> input_desc;
+    input_desc.reserve(vec.size());
+    for (const std::string& str : vec) {
+      input_desc.push_back(strideInputFromString(str));
+    }
+    striding_inputs.push_back(input_desc);
+  }
+  std::unordered_map<const Value*, std::vector<StrideInput>> stride_map;
+  size_t index = 0;
+  for (Value* v : subgraph->inputs()) {
+    if (!v->type()->cast<TensorType>()) {
+      continue;
+    }
+    stride_map[v] = striding_inputs[index];
+    index++;
+  }
+
+  std::shared_ptr<tensorexpr::TensorExprKernel> kernel =
+      std::make_shared<tensorexpr::TensorExprKernel>(
+          subgraph,
+          custom_lowerings,
+          sym_shapes,
+          /*pre_alloc*/ false,
+          stride_map);
 
   auto num_subgraph_inputs = subgraph->inputs().size();
   return [kernel, num_subgraph_inputs](Stack& stack) {
