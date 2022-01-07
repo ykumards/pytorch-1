@@ -6,12 +6,15 @@
 #include <c10/util/string_view.h>
 #include <c10/util/Optional.h>
 #include <ATen/core/DimVector.h>
+#include <ATen/ExpandUtils.h>
+#include <ATen/TensorUtils.h>
 #include <ATen/native/TensorIterator.h>
 
 #include <functional>
 #include <string>
 #include <tuple>
 #include <vector>
+#include <type_traits>
 
 namespace at { namespace native {
 
@@ -138,7 +141,6 @@ void batch_iterator_with_broadcasting(const Tensor& a, const Tensor& b, const fu
   iter.serial_for_each(loop, {0, batchCount(b)});
 }
 
-
 // Returns the epsilon value for floating types except half
 double _get_epsilon(const ScalarType& sc_type);
 
@@ -170,7 +172,6 @@ TORCH_API std::tuple<std::vector<int64_t>,
                      std::vector<int64_t>,
                      int64_t> _compute_geometry_for_Q(const Tensor& input, bool reduced);
 
-TORCH_API std::tuple<Tensor, Tensor, Tensor> _create_U_S_VT(const Tensor& input, bool some, bool compute_uv, const bool svd_use_cusolver=false);
 
 TORCH_API Tensor same_stride_to(const Tensor& original_tensor, const at::TensorOptions& options);
 
@@ -182,7 +183,9 @@ TORCH_API int64_t computeLRWorkDim(const char jobz, int64_t m, int64_t n);
 
 void checkUplo(const c10::string_view uplo);
 
-void checkSameDevice(const std::string& fn_name, Tensor result, Tensor input, const std::string& result_name = "result");
+bool svd_uses_cusolver(const Tensor& A);
+
+TORCH_API void checkSameDevice(const std::string& fn_name, Tensor result, Tensor input, const std::string& result_name = "result");
 
 void checkLinalgCompatibleDtype(const std::string& fn_name, Tensor result, Tensor input, const std::string& result_name = "result");
 
