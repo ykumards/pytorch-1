@@ -5397,29 +5397,41 @@ def sample_inputs_svd(op_info, device, dtype, requires_grad=False, **kwargs):
     make_arg = partial(make_fullrank, dtype=dtype, device=device, requires_grad=requires_grad)
 
     is_linalg_svd = (op_info.name == "linalg.svd")
+    batches = [(), (0, ), (3, )]
+    ns = [0, 3, 5]
 
-    batches = [(), (0, ), (2, )]
-    ns = [0, 2, 5]
-
-    # The .abs() is to make these functions invariant under multiplication by e^{i\theta}
-    # since the complex SVD is unique up to multiplication of the columns of U / V a z \in C with \norm{z} = 1
-    # See the docs of torch.linalg.svd for more info
-    def check_grads(usv):
+    def uniformize(usv):
         S = usv[1]
         k = S.shape[-1]
         U = usv[0][..., :k]
         Vh = usv[2] if is_linalg_svd else usv[2].mH
         Vh = Vh[..., :k, :]
-        return (U.abs(), S, Vh.abs())
+        return U, S, Vh
+
+    def fn_U(usv):
+        U, _, _ = uniformize(usv)
+        return U.abs()
+
+
+    def fn_S(usv):
+        return uniformize(usv)[1]
+
+    def fn_Vh(usv):
+        # We also return S to test
+        _, S, Vh = uniformize(usv)
+        return S, Vh.abs()
+
+    def fn_UVh(usv):
+        U, S, Vh = uniformize(usv)
+        return U @ Vh, S
+
+    fns = (fn_U, fn_S, fn_Vh, fn_UVh)
 
     fullmat = 'full_matrices' if is_linalg_svd else 'some'
 
-    def generate_inputs():
-        for batch, n, k, fullmat_val in product(batches, ns, ns, (True, False)):
-            shape = batch + (n, k)
-            yield SampleInput(make_arg(*shape), kwargs={fullmat: fullmat_val}, output_process_fn_grad=check_grads)
-
-    return list(generate_inputs())
+    for batch, n, k, fullmat_val, fn in product(batches, ns, ns, (True, False), fns):
+        shape = batch + (n, k)
+        yield SampleInput(make_arg(*shape), kwargs={fullmat: fullmat_val}, output_process_fn_grad=fn)
 
 
 def sample_inputs_permute(op_info, device, dtype, requires_grad, **kwargs):
@@ -9634,6 +9646,7 @@ op_db: List[OpInfo] = [
            aten_name='linalg_det',
            sample_inputs_func=sample_inputs_linalg_det,
            decorators=[skipCUDAIfNoMagma, skipCPUIfNoLapack, skipCUDAIfRocm],
+           check_batched_gradgrad=False,
            supports_inplace_autograd=False,
            skips=(
                # https://github.com/pytorch/pytorch/issues/67512
@@ -9649,6 +9662,7 @@ op_db: List[OpInfo] = [
            aten_name='linalg_det',
            sample_inputs_func=sample_inputs_linalg_det_singular,
            decorators=[skipCUDAIfNoMagma, skipCPUIfNoLapack, skipCUDAIfRocm],
+           check_batched_gradgrad=False,
            supports_inplace_autograd=False,
            skips=(
                # https://github.com/pytorch/pytorch/issues/67512
@@ -9694,9 +9708,11 @@ op_db: List[OpInfo] = [
            dtypes=floating_and_complex_types(),
            sample_inputs_func=sample_inputs_linalg_cond,
            check_batched_gradgrad=False,
+           check_batched_forward_grad=False,
+           supports_forward_ad=True,
+           supports_fwgrad_bwgrad=True,
            gradcheck_nondet_tol=GRADCHECK_NONDET_TOL,
-           decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCUDAIfRocm, skipCPUIfNoLapack],
-           ),
+           decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCUDAIfRocm, skipCPUIfNoLapack],),
     OpInfo('linalg.eig',
            aten_name='linalg_eig',
            op=torch.linalg.eig,
@@ -9863,6 +9879,7 @@ op_db: List[OpInfo] = [
     OpInfo('linalg.matrix_norm',
            aten_name='linalg_matrix_norm',
            dtypes=floating_and_complex_types(),
+           check_batched_gradgrad=False,
            decorators=[skipCUDAIfNoMagma, skipCPUIfNoLapack],
            sample_inputs_func=sample_inputs_linalg_matrix_norm,
            skips=(
@@ -9889,11 +9906,7 @@ op_db: List[OpInfo] = [
            op=torch.linalg.slogdet,
            dtypes=floating_and_complex_types(),
            sample_inputs_func=sample_inputs_linalg_slogdet,
-           decorators=[skipCUDAIfNoMagma, skipCUDAIfRocm, skipCPUIfNoLapack],
-           skips=(
-               # RuntimeError: element 0 of tensors does not require grad and does not have a grad_fn
-               DecorateInfo(unittest.expectedFailure, 'TestCommon', 'test_noncontiguous_samples'),
-           )),
+           decorators=[skipCUDAIfNoMagma, skipCUDAIfRocm, skipCPUIfNoLapack],),
     OpInfo('linalg.vector_norm',
            op=torch.linalg.vector_norm,
            dtypes=floating_and_complex_types_and(torch.float16, torch.bfloat16),
@@ -12636,32 +12649,44 @@ op_db: List[OpInfo] = [
            op=torch.svd,
            dtypes=floating_and_complex_types(),
            sample_inputs_func=sample_inputs_svd,
+           supports_forward_ad=True,
+           supports_fwgrad_bwgrad=True,
+           check_batched_forward_grad=False,
+           # We're using at::allclose, which does not have a batching rule
+           check_batched_grad=False,
            check_batched_gradgrad=False,
-           decorators=[
-               skipCUDAIfNoMagmaAndNoCusolver,
-               skipCUDAIfRocm,
-               skipCPUIfNoLapack,
-           ]),
+           decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCPUIfNoLapack],
+           skips=(
+               # Fixme, forward over backward gives a numerical error
+               DecorateInfo(unittest.expectedFailure, 'TestGradients', 'test_fn_fwgrad_bwgrad', dtypes=(torch.complex128,)),
+           )),
     OpInfo('linalg.svd',
            op=torch.linalg.svd,
            aten_name='linalg_svd',
            dtypes=floating_and_complex_types(),
-           sample_inputs_func=sample_inputs_svd,
+           supports_fwgrad_bwgrad=True,
+           supports_forward_ad=True,
+           check_batched_forward_grad=False,
+           # We're using at::allclose, which does not have a batching rule
+           check_batched_grad=False,
            check_batched_gradgrad=False,
-           decorators=[
-               skipCUDAIfNoMagmaAndNoCusolver,
-               skipCUDAIfRocm,
-               skipCPUIfNoLapack,
-           ]),
+           sample_inputs_func=sample_inputs_svd,
+           decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCPUIfNoLapack],
+           skips=(
+               # FIXME forward over backward gives a numerical error
+               DecorateInfo(unittest.expectedFailure, 'TestGradients', 'test_fn_fwgrad_bwgrad', dtypes=(torch.complex128,)),
+           )),
     OpInfo('linalg.svdvals',
            op=torch.linalg.svdvals,
            aten_name='linalg_svdvals',
            dtypes=floating_and_complex_types(),
-           sample_inputs_func=sample_inputs_linalg_svdvals,
+           check_batched_forward_grad=False,
+           supports_fwgrad_bwgrad=True,
+           supports_forward_ad=True,
+           # We're using at::allclose, which does not have a batching rule
            check_batched_gradgrad=False,
-           decorators=[
-               skipCUDAIfNoMagmaAndNoCusolver,
-               skipCPUIfNoLapack]),
+           sample_inputs_func=sample_inputs_linalg_svdvals,
+           decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCPUIfNoLapack]),
     OpInfo('svd_lowrank',
            op=lambda *args, **kwargs: wrapper_set_seed(
                lambda a, b, **kwargs: torch.svd_lowrank(a @ b.mT, **kwargs),
@@ -12671,7 +12696,9 @@ op_db: List[OpInfo] = [
            supports_out=False,
            check_batched_grad=False,
            check_batched_gradgrad=False,
-           supports_forward_ad=False,
+           check_batched_forward_grad=False,
+           supports_fwgrad_bwgrad=True,
+           supports_forward_ad=True,
            sample_inputs_func=sample_inputs_svd_lowrank,
            decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCUDAIfRocm, skipCPUIfNoLapack],
            skips=(
@@ -12685,9 +12712,11 @@ op_db: List[OpInfo] = [
            ),
            dtypes=floating_types(),
            supports_out=False,
+           check_batched_forward_grad=False,
            check_batched_grad=False,
            check_batched_gradgrad=False,
-           supports_forward_ad=False,
+           supports_forward_ad=True,
+           supports_fwgrad_bwgrad=True,
            sample_inputs_func=sample_inputs_pca_lowrank,
            decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCUDAIfRocm, skipCPUIfNoLapack],
            skips=(
@@ -14222,7 +14251,11 @@ op_db: List[OpInfo] = [
     OpInfo('norm',
            variant_test_name='nuc',
            sample_inputs_func=sample_inputs_norm_nuc,
-           decorators=[skipCUDAIfNoMagma, skipCPUIfNoLapack],
+           decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCPUIfNoLapack],
+           check_batched_gradgrad=False,
+           check_batched_forward_grad=False,
+           supports_forward_ad=True,
+           supports_fwgrad_bwgrad=True,
            dtypes=floating_and_complex_types(),
            dtypesIfCUDA=floating_and_complex_types(),
            skips=(
