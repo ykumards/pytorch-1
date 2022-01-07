@@ -4,11 +4,10 @@
 #include <ATen/Parallel.h>
 #include <ATen/core/interned_strings.h>
 #include <ATen/core/ivalue.h>
+#include <test/cpp/jit/test_utils.h>
 #include <torch/csrc/jit/passes/remove_mutation.h>
 #include <torch/csrc/jit/passes/tensorexpr_fuser.h>
 #include <torch/csrc/jit/tensorexpr/kernel.h>
-
-#include <test/cpp/jit/test_utils.h>
 
 #include <torch/csrc/autograd/engine.h>
 #include <torch/csrc/autograd/generated/variable_factories.h>
@@ -2871,7 +2870,8 @@ TEST_F(Composed, ComposedOp) {
   bool fusable_on_device = torch::jit::tensorexpr::getTEMustUseLLVMOnCPU();
   torch::jit::tensorexpr::getTEMustUseLLVMOnCPU() = false;
   setTensorExprDynamicShapeFusionEnabled(true);
-  FuseTensorExprs(graph);
+  FuseTensorExprs(
+      graph, 2, /*disable_size_checks*/ false, /*add_composed_op*/ true);
   Code code(graph, "");
   InterpreterState interpreter{code};
   std::vector<IValue> stack = {a, b};
