@@ -363,6 +363,8 @@ class TestFuseFx(QuantizationTestCase):
 
     @skipIfNoFBGEMM
     def test_qconfig_fused_module(self):
+        """ TODO: add test for all fused modules
+        """
         qconfig_dict = {
             "": None,
             "object_type": [(nn.Linear, default_qconfig),
@@ -853,15 +855,17 @@ class TestQuantizeFx(QuantizationTestCase):
                 m_eager.eval()
                 qconfig = get_default_qconfig(qengine)
                 prepare_fn = prepare
+                is_qat = False
             else:
                 m_eager.train()
                 qconfig = get_default_qat_qconfig(qengine)
                 prepare_fn = prepare_qat
+                is_qat = True
 
             fuse_list = ["conv", "bn"]
             if has_relu:
                 fuse_list.append("relu")
-            fuse_modules(m_eager, fuse_list, inplace=True)
+            fuse_modules(m_eager, fuse_list, inplace=True, is_qat=is_qat)
             m_eager.qconfig = qconfig
             m_eager = prepare_fn(m_eager)
             m_eager(*self.img_data_dict[dim][0])
@@ -5749,6 +5753,7 @@ class TestQuantizeFxModels(QuantizationTestCase):
             graph.eval()
             calibrate_or_train = test_only_eval_fn
             data = self.img_data_2d
+            is_qat = False
         else:
             assert quant_type == QuantType.QAT
             qconfig = default_qat_qconfig
@@ -5758,9 +5763,10 @@ class TestQuantizeFxModels(QuantizationTestCase):
             graph.train()
             calibrate_or_train = test_only_train_fn
             data = self.img_data_2d_train
+            is_qat = True
 
         if hasattr(eager, "fuse_model"):
-            eager.fuse_model()
+            eager.fuse_model(is_qat)
         eager = QuantWrapper(eager)
         eager.qconfig = qconfig
         eager = eager_prepare(eager)
