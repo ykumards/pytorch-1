@@ -18,7 +18,7 @@ LOWER_MODULE_MAP: Dict[Type[torch.nn.Module], Type[ReferenceableQuantizedModule]
 
 def _lower_weighted_ref_module(model: QuantizedGraphModule, ref_class: Type[torch.nn.Module]) -> QuantizedGraphModule:
     """
-    Traverse the graph and find dequantize - ref module - quantize patterns
+    Traverse the graph and find dequantize - ref module (- ReLU) - quantize patterns
     and replace them with the quantized version of the ref module.
     """
     if ref_class not in LOWER_MODULE_MAP:

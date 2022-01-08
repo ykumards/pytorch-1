@@ -3251,6 +3251,35 @@ class TestQuantizeFx(QuantizationTestCase):
         # checking result match
         self.assertEqual(out_ref, out)
 
+    def test_linear_relu_lowering(self):
+        class M(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = torch.nn.Linear(5, 5)
+                self.relu = torch.nn.ReLU()
+
+            def forward(self, x):
+                return self.relu(self.linear(x))
+
+        m = M().eval()
+        m = prepare_fx(m, {"": default_qconfig})
+        m_ref = copy.deepcopy(m)
+        m_ref = convert_fx(m_ref, is_reference=True)
+        m = convert_fx(m)
+        data = torch.randn(8, 5)
+        out_ref = m_ref(data)
+        out = m(data)
+        # check that reference pattern for quantized linear module is fused
+        #expected_node_occurrence = {
+        #    ns.call_function(torch.quantize_per_tensor): 1,
+        #    ns.call_module(torch.nn.quantized.Linear): 1,
+        #    ns.call_method("dequantize"): 1
+        #}
+        #self.checkGraphModuleNodes(m, expected_node_occurrence=expected_node_occurrence)
+
+        ## checking result match
+        #self.assertEqual(out_ref, out)
+
     def test_conv_lowering(self):
         convs = {1: nn.Conv1d, 2: nn.Conv2d, 3: nn.Conv3d}
         qconvs = {1: nn.quantized.Conv1d, 2: nn.quantized.Conv2d, 3: nn.quantized.Conv3d}
