@@ -338,5 +338,32 @@ SparseCsrTensor clone_sparse_csr(
                                                options.pinned_memory_opt());
 }
 
+Tensor empty_like_sparse_csr(
+    const Tensor& self,
+    c10::optional<ScalarType> dtype,
+    c10::optional<Layout> layout,
+    c10::optional<Device> device,
+    c10::optional<bool> pin_memory,
+    c10::optional<c10::MemoryFormat> optional_memory_format) {
+  TensorOptions options = TensorOptions().dtype(dtype).layout(layout).device(device).pinned_memory(pin_memory);
+
+  TORCH_CHECK(
+      !(options.layout() != kStrided &&
+          optional_memory_format.has_value()),
+      "memory format option is only supported by strided tensors");
+
+  TORCH_INTERNAL_ASSERT(options.layout() == kSparseCsr && self.is_sparse_csr());
+
+  auto result = at::native::_sparse_csr_tensor_unsafe(
+      self.crow_indices().clone(),
+      self.col_indices().clone(),
+      at::empty(self.values().sizes(), options.layout(kStrided)),
+      self.sizes(),
+      dtype,
+      self.layout(),
+      device);
+  return result;
+}
+
 } // namespace native
 } // namespace at
