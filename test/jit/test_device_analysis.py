@@ -187,3 +187,14 @@ class TestDeviceAnalysis(JitTestCase):
             (self.cuda, self.cuda),
         ]
         self.zerodim_test_core(device_pairs)
+
+    def test_device_if_propagation(self):
+        def test_fn(x, y, z: bool):
+            if z:
+                return x + 3
+            else:
+                return y * 2
+
+        self.assert_device_equal(test_fn, [self.cpu, self.cpu, None], self.cpu)
+        self.assert_device_equal(test_fn, [self.mkldnn, self.mkldnn, None], self.mkldnn)
+        self.assert_device_equal(test_fn, [self.cpu, self.cuda, None], None)

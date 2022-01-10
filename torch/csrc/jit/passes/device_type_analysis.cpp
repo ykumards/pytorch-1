@@ -170,7 +170,7 @@ struct DeviceTypePropagationPass {
     GRAPH_DEBUG("processNode");
     switch (n->kind()) {
       case prim::If:
-        // return processIf(n);
+        return processIf(n);
       case prim::Loop:
       case prim::CallMethod:
       case prim::CallFunction:
@@ -202,6 +202,44 @@ struct DeviceTypePropagationPass {
           return; // Not handled for now
         }
     }
+  }
+
+  bool mergeAndApplyTensorProps(
+      const at::ArrayRef<Value*>& src1,
+      const at::ArrayRef<Value*>& src2,
+      const at::ArrayRef<Value*>& dst) {
+    bool changed = false;
+    TORCH_INTERNAL_ASSERT(src1.size() == src2.size());
+    TORCH_INTERNAL_ASSERT(src1.size() == dst.size());
+
+    for (int i = 0; i < dst.size(); i++) {
+      auto src1_type = src1[i]->type()->cast<TensorType>();
+      auto src2_type = src2[i]->type()->cast<TensorType>();
+      if (!src1_type || !src2_type) {
+        continue;
+      }
+
+      if (!src1_type->device()|| !src2_type->device()
+          || !(src1_type->device().value() == src2_type->device().value())) {
+        changed |= setDeviceType(dst[i], c10::nullopt);
+      } else {
+        changed |= setDeviceType(dst[i], src1_type->device());
+      }
+    }
+    return changed;
+  }
+
+  void processIf(Node* node) {
+    GRAPH_DEBUG("processIf");
+    auto blocks = node->blocks();
+    auto true_block = blocks.at(0);
+    auto false_block = blocks.at(1);
+
+    processBlock(true_block);
+    processBlock(false_block);
+
+    mergeAndApplyTensorProps(
+        true_block->outputs(), false_block->outputs(), node->outputs());
   }
 
   void processAtenOps(Node* n) {
