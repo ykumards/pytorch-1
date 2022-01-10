@@ -2,7 +2,13 @@ from itertools import product
 import unittest
 
 import torch
+from torch.testing._internal.common_utils import TEST_CUDA
 from torch.testing._internal.jit_utils import JitTestCase
+
+try:
+    from torchvision import models
+except ImportError:
+    models = None
 
 if __name__ == "__main__":
     raise RuntimeError(
@@ -11,7 +17,39 @@ if __name__ == "__main__":
         "instead."
     )
 
-TEST_CUDA = torch.cuda.is_available()
+# TODO: Delete this when PR #67786 is merged.
+def apply_input_props_using_example(graph, example_input):
+    """
+    Applies properties for each tensor in the graph inputs
+    using the example supplied.
+    """
+    graph_inputs = list(graph.inputs())
+    if len(graph_inputs) == 0:
+        return
+
+    # Strip self args off for methods
+    in_0 = graph_inputs[0]
+    if isinstance(in_0.type(), torch._C.ClassType) and in_0.debugName() == "self":
+        graph_inputs = graph_inputs[1:]
+
+    if not len(graph_inputs) == len(example_input):
+        raise RuntimeError(
+            "Number of inputs in graph does not match number of inputs in the example"
+        )
+
+    for i, (graph_i, example_i) in enumerate(zip(graph_inputs, example_input)):
+        if example_i is None:
+            continue  # Skip the type check
+
+        if isinstance(example_i, torch.Tensor) != isinstance(
+            graph_i.type(), torch.TensorType
+        ):
+            raise RuntimeError(
+                f"Input {i} does not match type of example", graph_i, example_i
+            )
+
+        if isinstance(example_i, torch.Tensor):
+            graph_i.setType(torch.TensorType.create_from_tensor(example_i))  # type: ignore[arg-type]
 
 
 class TestDeviceAnalysis(JitTestCase):
@@ -20,7 +58,9 @@ class TestDeviceAnalysis(JitTestCase):
         cls.cpu = torch.device("cpu")
         cls.cuda = torch.device("cuda")
         cls.vulkan = torch.device("vulkan")
-        cls.mkldnn = torch.device("mkldnn")
+        cls.mkldnn = torch.device(
+            "mkldnn"
+        )  # MKLDNN can't mix with other device types at all
         cls.device_types = [cls.cpu, cls.cuda, cls.vulkan]
 
     @staticmethod
@@ -75,6 +115,29 @@ class TestDeviceAnalysis(JitTestCase):
         # self.prop_device_on_graph(graph, [self.cpu])
         self.assertEqual(graph_input.type().device(), self.cpu)
 
+    @unittest.skipIf(models is None, "Requires torchvision")
+    def test_mobilenet(self):
+        in_cpu = torch.randn(1, 3, 224, 224, device=self.cpu)
+        in_example = in_cpu
+
+        expected_device = self.cpu
+        m = torch.jit.script(models.mobilenet_v3_small())
+        m.eval()
+        graph = torch.jit.freeze(m).graph
+        # torch._C._jit_pass_erase_shape_information(graph)
+        apply_input_props_using_example(graph, in_example)
+        torch._C._jit_pass_propagate_shapes_on_graph(graph)
+        torch._C._jit_pass_propagate_device(graph)
+
+        actual_device = self.node_output_device(graph)
+
+        if expected_device is None or actual_device is None:
+            self.assertEqual(actual_device, expected_device)
+        else:
+            self.assertEqual(
+                actual_device.type, expected_device.type, "Failed Verification"
+            )
+
     def test_simple(self):
         def add_self(x):
             return x + x
@@ -101,6 +164,28 @@ class TestDeviceAnalysis(JitTestCase):
 
         for in_device in self.device_types:
             self.assert_device_equal(set_device, [in_device, None], None)
+
+    def test_tensor_as_fns(self):
+        def view_as_fn(x, y):
+            return x.view_as(y)
+
+        def expand_as_fn(x, y):
+            return x.expand_as(y)
+
+        def reshape_as_fn(x, y):
+            return x.reshape_as(y)
+
+        for test_fn in [view_as_fn, expand_as_fn, reshape_as_fn]:
+            self.assert_device_equal(test_fn, [self.cpu, self.cpu], self.cpu)
+            self.assert_device_equal(test_fn, [self.cuda, None], self.cuda)
+            self.assert_device_equal(test_fn, [None, self.mkldnn], None)
+
+        def type_as_fn(x, y):
+            return x.type_as(y)
+
+        self.assert_device_equal(type_as_fn, [self.cpu, self.cpu], self.cpu)
+        self.assert_device_equal(type_as_fn, [self.cuda, None], None)
+        self.assert_device_equal(type_as_fn, [None, self.mkldnn], self.mkldnn)
 
     def zerodim_test_core(self, device_pairs):
         # Test the support of zerodim tensors with non-zerodim tensors
@@ -187,6 +272,28 @@ class TestDeviceAnalysis(JitTestCase):
             (self.cuda, self.cuda),
         ]
         self.zerodim_test_core(device_pairs)
+
+    def test_custom_device_op(self):
+        # Test both of the custom functions and check that the devicetype is
+        # correctly applied
+        def set_cuda(x):
+            return x.cuda()
+
+        def set_cpu(x):
+            return x.cpu()
+
+        def set_mkldnn(x):
+            return x.to_mkldnn()
+
+        device_pairs = (
+            (set_cuda, self.cuda),
+            (set_cpu, self.cpu),
+            (set_mkldnn, self.mkldnn),
+        )
+
+        for fn, out_device in device_pairs:
+            for in_device in self.device_types:
+                self.assert_device_equal(fn, [in_device], out_device)
 
     def test_device_if_propagation(self):
         def test_fn(x, y, z: bool):

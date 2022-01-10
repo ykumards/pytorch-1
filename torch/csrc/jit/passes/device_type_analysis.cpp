@@ -7,6 +7,7 @@
 #include <torch/csrc/jit/jit_log.h>
 #include <torch/csrc/jit/passes/device_type_analysis.h>
 #include <torch/library.h>
+#include <cstddef>
 #include <memory>
 #include <utility>
 
@@ -150,6 +151,7 @@ bool defaultDeviceProp(Node* n) {
 struct DeviceTypePropagationPass {
   explicit DeviceTypePropagationPass(std::shared_ptr<Graph> graph)
       : graph_(std::move(graph)) {
+    buildRuleRegistry();
   }
 
   // returns true if at least one node has its scalar type set on a tensor node
@@ -219,8 +221,8 @@ struct DeviceTypePropagationPass {
         continue;
       }
 
-      if (!src1_type->device()|| !src2_type->device()
-          || !(src1_type->device().value() == src2_type->device().value())) {
+      if (!src1_type->device() || !src2_type->device() ||
+          !(src1_type->device().value() == src2_type->device().value())) {
         changed |= setDeviceType(dst[i], c10::nullopt);
       } else {
         changed |= setDeviceType(dst[i], src1_type->device());
@@ -250,13 +252,47 @@ struct DeviceTypePropagationPass {
     if (!op) {
       return;
     }
+    auto prop_fn = device_prop_registry_->find(*op);
+    if (prop_fn) {
+      PropRule rule = *prop_fn;
+      changed_ |= rule(n);
+      return;
+    }
     changed_ |= defaultDeviceProp(n);
   }
 
+  void buildRuleRegistry() {
+    // building a registry for all of the custom Device Type rules
+    if (device_prop_registry_)
+      return;
 
+    static OperatorMap<PropRule> temp_registry{
+        {"aten::cpu(Tensor self) -> Tensor",
+         setReturnstoDeviceRule(DeviceType::CPU)},
+        {"aten::cuda(Tensor self) -> Tensor",
+         setReturnstoDeviceRule(DeviceType::CUDA)},
+        {"aten::to_mkldnn(Tensor self, ScalarType? dtype) -> Tensor",
+         setReturnstoDeviceRule(DeviceType::MKLDNN)},
+        {"aten::reshape_as(Tensor self, Tensor other) -> Tensor",
+         returnFirstArgDeviceRule},
+        {"aten::view_as(Tensor self, Tensor other) -> Tensor",
+         returnFirstArgDeviceRule},
+        {"aten::expand_as(Tensor self, Tensor other) -> Tensor",
+         returnFirstArgDeviceRule},
+        {"aten::type_as(Tensor self, Tensor other) -> Tensor",
+         returnSecondArgDeviceRule},
+    };
+    device_prop_registry_ =
+        std::make_unique<OperatorMap<PropRule>>(std::move(temp_registry));
+  }
+
+  static std::unique_ptr<OperatorMap<PropRule>> device_prop_registry_;
   std::shared_ptr<Graph> graph_;
   bool changed_ = false;
 };
+
+std::unique_ptr<OperatorMap<PropRule>>
+    DeviceTypePropagationPass::device_prop_registry_ = nullptr;
 
 } // anonymous namespace
 
